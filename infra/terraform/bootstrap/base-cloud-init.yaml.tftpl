@@ -1,0 +1,54 @@
+#cloud-config
+
+package_update: true
+package_upgrade: false
+ssh_pwauth: false
+
+users:
+  - name: guts
+    groups: users,sudo
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO39OGEiqlqDWYVqf/+mHUtTknSkdPNTcRDYvy8GKR9V rk4devteam@gmail.com
+
+packages:
+  - ca-certificates
+  - curl
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-rk4-k3s.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      Port ${ssh_port}
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+      MaxAuthTries 3
+      AuthorizedKeysFile .ssh/authorized_keys
+
+  - path: /etc/netplan/60-rk4-k3s-private-network.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp7s0:
+            dhcp4: false
+            addresses:
+              - ${private_ip}/32
+            routes:
+              - to: ${private_network_cidr}
+                via: ${private_gateway}
+                on-link: true
+
+runcmd:
+  - ip link set enp7s0 up || true
+  - netplan apply
+  - ssh-keygen -A
+  - /usr/sbin/sshd -t
+  - systemctl reload-or-restart ssh

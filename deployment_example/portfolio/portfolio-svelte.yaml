@@ -1,0 +1,118 @@
+# kubernetes manifest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portfolio-svelte
+  namespace: my-k3s
+  labels:
+    app: portfolio-svelte
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: portfolio-svelte
+  template:
+    metadata:
+      labels:
+        app: portfolio-svelte
+    spec:
+      imagePullSecrets:
+        - name: github_api_key
+      containers:
+        - name: portfolio-svelte
+          image: ghcr.io/rk4-dev/portfolio-svelte:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portfolio-svelte
+  namespace: my-k3s
+  labels:
+    app: portfolio-svelte
+spec:
+  type: ClusterIP
+  selector:
+    app: portfolio-svelte
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portfolio-svelte
+  namespace: my-k3s
+  labels:
+    app: portfolio-svelte
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: my-k3s-redirect-http-to-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - my_domain_name.com
+      secretName: portfolio-svelte-tls
+  rules:
+    - host: my_domain_name.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: portfolio-svelte
+                port:
+                  number: 80
+    # - host: rk4.dev
+    #   http:
+    #     paths:
+    #       - path: /
+    #         pathType: Prefix
+    #         backend:
+    #           service:
+    #             name: portfolio-svelte
+    #             port:
+    #               number: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-http-to-https
+  namespace: my-k3s
+  labels:
+    app: portfolio-svelte
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    email: some_email@gmail.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik

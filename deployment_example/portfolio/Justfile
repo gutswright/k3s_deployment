@@ -1,0 +1,65 @@
+alias d := deploy
+alias kd := deploy
+
+registry := "ghcr.io"
+registry_user := "github_username"
+image_repo := "org_or_user/image_name"
+image := registry + "/" + image_repo
+tag := `date +%Y%m%d%H%M%S`
+namespace := "my-k3s"
+deployment := "portfolio-svelte"
+container := "portfolio-svelte"
+manifest := "portfolio-svelte.yaml"
+pull_secret := "github_api_key"
+
+# List available commands
+default:
+    just --list
+
+# Build, push, and deploy the Svelte app through GHCR
+deploy: require-token build login ensure-pull-secret
+    @echo '{{ BOLD + GREEN }}Starting Kubernetes Deployment{{ NORMAL }}'
+    @echo '{{ BOLD + BLUE }} - Building {{ image }}:{{ tag }}{{ NORMAL }}'
+    docker build -t {{ image }}:{{ tag }} -t {{ image }}:latest ./svelte
+    docker push {{ image }}:{{ tag }}
+    docker push {{ image }}:latest
+
+    @echo '{{ BOLD + BLUE }} - Applying Kubernetes manifest{{ NORMAL }}'
+    kubectl apply -f ./{{ manifest }}
+    kubectl -n {{ namespace }} set image deployment/{{ deployment }} {{ container }}={{ image }}:{{ tag }}
+    kubectl -n {{ namespace }} rollout status deployment/{{ deployment }}
+
+    @echo '{{ BOLD + GREEN }}Finished Kubernetes Deployment: {{ image }}:{{ tag }}{{ NORMAL }}'
+    @notify-send -a Deployment "Deployment" "Successfully Finished Kubernetes Deployment for Joshua Wright Portfolio" || true
+
+# Build SvelteKit app for the existing Dockerfile, then keep production deps
+[working-directory('svelte')]
+build:
+    pnpm install
+    pnpm run build
+    pnpm prune --production
+
+# Log Docker into GitHub Container Registry
+login: require-token
+    @printf '%s' "$GITHUB_K3S_REGISTRY_TOKEN" | docker login {{ registry }} -u {{ registry_user }} --password-stdin
+
+# Create or update the cluster secret used to pull private GHCR images
+ensure-pull-secret: require-token
+    @kubectl -n {{ namespace }} create secret docker-registry {{ pull_secret }} --docker-server={{ registry }} --docker-username={{ registry_user }} --docker-password="$GITHUB_K3S_REGISTRY_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+
+# Fail early if the GitHub registry token is not available
+require-token:
+    @test -n "$GITHUB_K3S_REGISTRY_TOKEN" || (echo 'GITHUB_K3S_REGISTRY_TOKEN is not set. Source ~/.zshrc or open a new shell.' && exit 1)
+
+# Restart the current Kubernetes deployment
+restart:
+    kubectl -n {{ namespace }} rollout restart deployment/{{ deployment }}
+    kubectl -n {{ namespace }} rollout status deployment/{{ deployment }}
+
+# Show portfolio Kubernetes resources
+status:
+    kubectl -n {{ namespace }} get deploy,svc,ingress,pods -l app={{ deployment }} -o wide
+
+# Show the live image currently running in Kubernetes
+image:
+    kubectl -n {{ namespace }} get deployment/{{ deployment }} -o jsonpath='{.spec.template.spec.containers[?(@.name=="{{ container }}")].image}{"\n"}'

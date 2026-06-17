@@ -1,0 +1,5 @@
+ssh_allowed_cidrs = [
+  "203.0.113.10/32"
+]
+
+hcloud_token = "replace-with-a-hetzner-API-token"
