@@ -1,112 +1,148 @@
-# App Migration Plan
+# App Deployment
 
 The old VM deployment model was:
 
 ```text
-local build -> rsync selected files to /rk4/<app> -> remote docker compose build/up -> Traefik Docker labels
+local build -> rsync files to /rk4/<app> -> remote docker compose build/up -> Traefik Docker labels
 ```
 
-The k3s deployment model should be:
+The current k3s deployment model is:
 
 ```text
-build image -> push image to registry -> helm upgrade/install -> Traefik Ingress
+local app build -> docker build -> docker push to GHCR -> kubectl apply -> kubectl set image
 ```
 
-## Shared Web App Path
+The reference implementation is `deployment_example/portfolio`.
 
-The reusable chart at `k8s/charts/rk4-webapp` covers single-container HTTP apps:
+## Portfolio Example
 
-- `ajt-web`, from `/home/gutswright/rk4/ajt/ajt-svelte`, port `3001`
-- `momentum-web`, from `/home/gutswright/rk4/momentum/momentum-svelte`, port `3002`
-- `portfolio-web`, from `/home/gutswright/rk4/portfolio/svelte`, port `3000`
-- `rover-mfg-web`, from `/home/gutswright/rk4/rover-mfg/skeleton`, port `3003`
+The example contains:
 
-Each app has a values file under `k8s/apps/<app>/values.yaml`.
+- `deployment_example/portfolio/Justfile`
+- `deployment_example/portfolio/portfolio-svelte.yaml`
 
-Before deploying, update each values file:
+The Justfile builds the Svelte app, builds and pushes a Docker image, applies
+the Kubernetes manifest, updates the Deployment image to the new tag, and waits
+for rollout.
 
-- set `ingress.hosts` to the real DNS names
-- enable `ingress.tls` only after certificate handling is in place
+Before using the example for a real app, update these values:
 
-Set the registry and image tag for local commands:
+- `registry_user`
+- `image_repo`
+- `namespace`
+- `deployment`
+- `container`
+- `manifest`
+- `pull_secret`
+- Ingress host names
+- cert-manager email
+
+## Registry Token
+
+The deploy flow expects a GitHub Container Registry token:
 
 ```sh
-export RK4_REGISTRY=ghcr.io/YOUR_OWNER
-export RK4_IMAGE_TAG=$(git rev-parse --short HEAD)
+export GITHUB_K3S_REGISTRY_TOKEN="..."
 ```
 
-Build and push an app image:
+The Justfile logs Docker into `ghcr.io` and creates or updates the Kubernetes
+image pull secret:
 
 ```sh
-just app-build portfolio-web
-just app-push portfolio-web
+kubectl -n my-k3s create secret docker-registry github_api_key \
+  --docker-server=ghcr.io \
+  --docker-username=github_username \
+  --docker-password="$GITHUB_K3S_REGISTRY_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Render one app locally:
+Do not commit the token or a rendered secret.
+
+## Deploy Commands
+
+Run from the app deployment directory:
 
 ```sh
-just app-render portfolio-web
+cd deployment_example/portfolio
+just deploy
 ```
 
-Deploy one app:
+Useful operational commands:
 
 ```sh
-just app-deploy portfolio-web
+just status
+just image
+just restart
 ```
 
-Check app status:
+The deploy target performs these steps:
 
-```sh
-just app-status
+```text
+require token
+-> build app dependencies and production bundle
+-> docker login
+-> create or update image pull secret
+-> docker build
+-> docker push immutable timestamp tag
+-> docker push latest
+-> kubectl apply manifest
+-> kubectl set image deployment/<name> <container>=<image>:<tag>
+-> kubectl rollout status
 ```
 
-## Stateful Apps
+## Kubernetes Manifest Pattern
 
-These should not be pushed through the generic web-app chart:
+Each single-container web app should define:
 
-- AJT Umami plus Postgres
-- Obsidian CouchDB
-- rk4-site Redis
-- rk4-site FastAPI and SQLite volume
-- rk4-site whiteboard MongoDB, storage backend, room backend, frontend
+- `Deployment`
+- `Service`
+- `Ingress`
+- optional Traefik `Middleware`
+- optional cert-manager `ClusterIssuer` or issuer reference
 
-For these, create dedicated manifests or charts with explicit `PersistentVolumeClaim`
-objects, `Secret` references, backups, and restore procedures.
+The Deployment should include:
+
+- explicit namespace
+- app labels shared by Deployment, Service, and Ingress
+- `imagePullSecrets` when using a private GHCR image
+- named container port
+- readiness and liveness probes
+
+The Service should be `ClusterIP`. The Ingress routes public traffic from
+Traefik to that Service.
 
 ## Traefik Mapping
 
-Docker labels become Kubernetes `Ingress` objects:
+Docker labels become Kubernetes resources:
 
 - `traefik.http.routers.<name>.rule=Host(...)` becomes `spec.rules[].host`
-- `traefik.http.services.<name>.loadbalancer.server.port=<port>` becomes a `Service`
-  targeting the pod container port
-- Docker networks are replaced by Kubernetes namespaces and Services
-- `depends_on` is replaced by app readiness and service DNS
+- `traefik.http.services.<name>.loadbalancer.server.port=<port>` becomes a
+  Service targeting the container port
+- Docker networks become Kubernetes namespaces and Services
+- `depends_on` becomes readiness probes and service DNS
 
-The cluster already has Traefik installed by k3s. Do not deploy the old
-`control-center` Traefik container into the cluster.
-
-## Image Registry
-
-Kubernetes workers need to pull images from a registry. The repo currently uses
-`RK4_REGISTRY` and `RK4_IMAGE_TAG` when rendering and deploying. If unset, the
-commands default to placeholder `ghcr.io/OWNER` and `latest`.
-
-If the registry is private, create an image pull secret in `rk4-apps` and add it
-to each values file:
-
-```yaml
-imagePullSecrets:
-  - name: ghcr
-```
+Do not deploy the old Docker Traefik container into the cluster. k3s provides
+Traefik inside Kubernetes.
 
 ## TLS
 
-The old Docker Traefik config used ACME certificate resolvers. The k3s Traefik
-bootstrap currently configures placement and replicas, not ACME.
+The portfolio example uses cert-manager annotations and a `ClusterIssuer` with
+HTTP-01 through Traefik.
 
-Use one of these before enabling TLS in app values:
+Before enabling TLS for an app:
 
-- install `cert-manager` and issue TLS secrets referenced by each Ingress
-- extend the k3s Traefik HelmChartConfig with ACME settings
-- terminate TLS before the cluster and run HTTP from the load balancer to Traefik
+- point DNS at the Hetzner Load Balancer public IPv4
+- make sure cert-manager is installed in the cluster
+- set the real host under `spec.tls[].hosts` and `spec.rules[].host`
+- set a real ACME email address
+
+## Stateful Apps
+
+Do not force stateful services through the simple web-app pattern. Apps with
+databases or durable storage need dedicated manifests or charts with:
+
+- `PersistentVolumeClaim` objects
+- `Secret` references
+- backup jobs
+- restore procedures
+- explicit upgrade notes

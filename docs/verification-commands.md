@@ -1,57 +1,59 @@
 # Verification Commands
 
-This document lists the main commands used to verify the Hetzner k3s cluster.
-Most commands are read-only. Commands that mutate state are called out
-separately.
+Most commands in this document are read-only. Commands that change state are
+called out separately.
 
 ## OpenTofu / Hetzner
 
-Run from `infra/terraform`.
+Run from the repository root:
 
 ```sh
-tofu plan
+just tf-plan
+tofu -chdir=infra/terraform output
+hcloud server list
+hcloud load-balancer list
 ```
 
-Checks whether real Hetzner infrastructure still matches the OpenTofu config.
-Expected when stable:
+Expected when infrastructure is stable:
 
 ```text
 No changes.
 ```
 
-```sh
-tofu output
+Current private addresses from the Terraform config:
+
+```text
+rk4-k3s-main-server   10.42.1.10
+rk4-k3s-server-2      10.42.1.12
+rk4-k3s-server-3      10.42.1.13
+rk4-k3s-lb-1          10.42.1.20
 ```
 
-Shows the current public/private IPs for the servers and load balancer.
-
-```sh
-hcloud server list
-```
-
-Shows Hetzner servers, public IPs, and private network attachments.
+Use `tofu output` for public IPs instead of hard-coding them.
 
 ## SSH Access
 
-Use the current IPs from `tofu output`.
+Use the current public IPs from `tofu output`.
 
 ```sh
-ssh -i ~/.ssh/rk4_key root@SERVER_PUBLIC_IP
 ssh -i ~/.ssh/rk4_key guts@SERVER_PUBLIC_IP
 ```
 
-If a server was rebuilt and SSH warns that the host key changed:
+If `ssh_port` was changed in `terraform.tfvars`, include the matching port:
+
+```sh
+ssh -i ~/.ssh/rk4_key -p SSH_PORT guts@SERVER_PUBLIC_IP
+```
+
+If a server was intentionally rebuilt and SSH warns that the host key changed:
 
 ```sh
 ssh-keygen -R SERVER_PUBLIC_IP
 ```
 
-That removes the old host key from local `known_hosts`. Only do this when the
-server was intentionally rebuilt.
-
 ## Cloud-init
 
-Run on a node.
+Run on each node:
 
 ```sh
 cloud-init status --long
@@ -68,30 +70,22 @@ errors: []
 If cloud-init failed:
 
 ```sh
-tail -n 200 /var/log/cloud-init-output.log
+sudo tail -n 200 /var/log/cloud-init-output.log
 ```
 
 For live progress while a node is booting:
 
 ```sh
-tail -f /var/log/cloud-init-output.log
+sudo tail -f /var/log/cloud-init-output.log
 ```
 
 ## Node Networking
 
-Run on each node.
+Run on each node:
 
 ```sh
-ip -4 addr show
+ip -4 addr show enp7s0
 ip route
-```
-
-Expected private node IPs:
-
-```text
-server-1:  10.42.1.10/32
-worker-1:  10.42.1.11/32
-worker-2:  10.42.1.12/32
 ```
 
 Expected Hetzner private route:
@@ -102,128 +96,169 @@ Expected Hetzner private route:
 
 Expected k3s pod routes use `10.244.x.x`, not `10.42.x.x`.
 
-From the server:
-
-```sh
-ping -c 3 10.42.1.11
-ping -c 3 10.42.1.12
-```
-
-From each worker:
+From any server, verify the private network:
 
 ```sh
 ping -c 3 10.42.1.10
+ping -c 3 10.42.1.12
+ping -c 3 10.42.1.13
+ping -c 3 10.42.1.20
 ```
 
 ## k3s Services
 
-On the server:
+All nodes are k3s servers in the current design.
+
+Run on each node:
 
 ```sh
 systemctl status k3s --no-pager -l
 journalctl -u k3s --no-pager -n 150
 ```
 
-On each worker:
-
-```sh
-systemctl status k3s-agent --no-pager -l
-journalctl -u k3s-agent --no-pager -n 150
-```
-
-Check API reachability from a worker:
+Check API readiness through each path:
 
 ```sh
 curl -k https://10.42.1.10:6443/readyz
+curl -k https://10.42.1.12:6443/readyz
+curl -k https://10.42.1.13:6443/readyz
+curl -k https://10.42.1.20:6443/readyz
 ```
 
 An HTTP `401` still proves the API server is reachable. A timeout or connection
-refused means the worker cannot reach the server API.
+refused means the network path or k3s service needs investigation.
 
 ## Kubernetes Health
 
-Run on the server.
+Run with a kubeconfig that points at the cluster:
 
 ```sh
 kubectl get nodes -o wide
 kubectl get nodes --show-labels
 kubectl get pods -A -o wide
+kubectl get --raw='/readyz?verbose'
 ```
 
-Expected:
+Expected nodes:
 
 ```text
-rk4-k3s-server-1   Ready
-rk4-k3s-worker-1   Ready
-rk4-k3s-worker-2   Ready
+rk4-k3s-main-server   Ready
+rk4-k3s-server-2      Ready
+rk4-k3s-server-3      Ready
 ```
 
-Worker pod CIDRs should be under `10.244.x.0/24`:
+Check pod CIDRs:
 
 ```sh
-kubectl describe node rk4-k3s-worker-1 | grep -i podcidr -A2
-kubectl describe node rk4-k3s-worker-2 | grep -i podcidr -A2
+kubectl describe node rk4-k3s-main-server | grep -i podcidr -A2
+kubectl describe node rk4-k3s-server-2 | grep -i podcidr -A2
+kubectl describe node rk4-k3s-server-3 | grep -i podcidr -A2
+```
+
+Pod CIDRs should be under `10.244.x.0/24`.
+
+Check the local k3s CLI from a server:
+
+```sh
+sudo k3s kubectl get nodes
+sudo k3s kubectl get --raw='/readyz?verbose'
 ```
 
 ## Traefik / Ingress
 
-Run on the server.
+Run with kubectl:
 
 ```sh
 kubectl get pods -n kube-system -o wide | grep traefik
 kubectl get svc -n kube-system traefik
-kubectl get deploy -n kube-system traefik -o jsonpath='{.spec.strategy}'; echo
+kubectl get ingress -A
 ```
 
-Expected:
-
-- one `traefik` pod on `rk4-k3s-worker-1`
-- one `traefik` pod on `rk4-k3s-worker-2`
-- one `svclb-traefik` pod on each worker
-- no `svclb-traefik` pod on `rk4-k3s-server-1`
-- Traefik service external IPs are only `10.42.1.11,10.42.1.12`
-
-Expected rollout strategy:
-
-```json
-{"rollingUpdate":{"maxSurge":0,"maxUnavailable":1},"type":"RollingUpdate"}
-```
-
-Test Traefik through each worker:
+Test Traefik through each node and through the load balancer:
 
 ```sh
-curl -I http://10.42.1.11
+curl -I http://10.42.1.10
 curl -I http://10.42.1.12
+curl -I http://10.42.1.13
+curl -I http://LOAD_BALANCER_PUBLIC_IPV4
 ```
 
-Test the public Hetzner Load Balancer:
+A `404 Not Found` from Traefik is acceptable when no matching Ingress route
+exists. It means the request reached Traefik.
+
+## App Deployment
+
+For the portfolio-style deployment:
 
 ```sh
-curl -I http://5.78.162.199
+cd deployment_example/portfolio
+just status
+just image
+kubectl -n my-k3s get deploy,svc,ingress,pods -l app=portfolio-svelte -o wide
+kubectl -n my-k3s rollout status deployment/portfolio-svelte
 ```
 
-For now, `404 Not Found` is expected. It means Traefik answered, but no app
-Ingress route exists yet.
+Check image pull secret presence:
 
-## Manual Commands Not Encoded as IaC
+```sh
+kubectl -n my-k3s get secret github_api_key
+```
 
-These commands were used during investigation or emergency recovery. They are
-not the desired steady-state workflow.
+Check Ingress and TLS state:
 
-### Temporary route experiments
+```sh
+kubectl -n my-k3s describe ingress portfolio-svelte
+kubectl -n my-k3s get certificate
+kubectl describe clusterissuer letsencrypt-prod
+```
 
-Used while discovering Hetzner private-network routing:
+## Mutating Commands
+
+These commands change state.
+
+Rebuild all three servers through Terraform:
+
+```sh
+./infra/terraform/bootstrap/rebuild_script.sh
+```
+
+Reinstall k3s after infrastructure exists:
+
+```sh
+export K3S_TOKEN="replace-with-the-cluster-token"
+./infra/terraform/bootstrap/install-k3s.sh
+```
+
+Redeploy the portfolio example:
+
+```sh
+cd deployment_example/portfolio
+export GITHUB_K3S_REGISTRY_TOKEN="..."
+just deploy
+```
+
+Restart the portfolio Deployment without building a new image:
+
+```sh
+cd deployment_example/portfolio
+just restart
+```
+
+## Historical Commands
+
+These commands were used during earlier investigation or recovery. They are not
+the desired steady-state workflow.
+
+Temporary private route experiments:
 
 ```sh
 ip route del 10.42.0.0/16 || true
 ip route add 10.42.0.0/16 via 10.42.0.1 dev enp7s0 onlink
 ```
 
-This is now encoded in cloud-init Netplan config.
+This is now encoded in `base-cloud-init.yaml.tftpl`.
 
-### Manual SSH/cloud-init repair
-
-Used while recovering from early broken cloud-init templates:
+Manual SSH repair:
 
 ```sh
 mkdir -p /run/sshd
@@ -231,43 +266,8 @@ sshd -t
 systemctl restart ssh
 ```
 
-This is now encoded in `base-cloud-init.yaml.tftpl`.
+This is now encoded in cloud-init.
 
-### Manual node cleanup
-
-Discussed but not part of steady-state IaC:
-
-```sh
-systemctl stop k3s-agent
-ip link delete cni0 || true
-ip link delete flannel.1 || true
-systemctl restart k3s-agent
-```
-
-The cluster was instead fixed by correcting cloud-init/k3s config and rebuilding.
-
-### Manual kubectl labels
-
-Discussed but replaced by k3s config:
-
-```sh
-kubectl label node ...
-```
-
-Node labels now come from `/etc/rancher/k3s/config.yaml`, generated by
-cloud-init.
-
-### Manual Traefik repair commands
-
-These are now encoded in the server bootstrap script:
-
-```sh
-kubectl apply -f /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
-kubectl -n kube-system patch deployment traefik --type=merge -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":0,"maxUnavailable":1}}}}'
-kubectl -n kube-system rollout restart deployment/traefik
-kubectl -n kube-system get pods --no-headers | awk '/^svclb-traefik-/ {print $1}' | xargs -r kubectl -n kube-system delete pod
-kubectl -n kube-system rollout status deployment/traefik --timeout=10m
-```
-
-They should not need to be run manually after a clean rebuild.
-
+Manual k3s install snippets in `infra/terraform/install_scripts` are historical
+references. The preferred install path is
+`infra/terraform/bootstrap/install-k3s.sh`.
