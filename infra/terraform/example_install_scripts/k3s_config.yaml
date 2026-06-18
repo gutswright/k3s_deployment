@@ -1,0 +1,18 @@
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: replace-with-base64-certificate-authority-data
+    server: https://203.0.113.20:6443
+  name: example-k3s
+contexts:
+- context:
+    cluster: example-k3s
+    user: example-k3s
+  name: example-k3s
+current-context: example-k3s
+kind: Config
+users:
+- name: example-k3s
+  user:
+    client-certificate-data: replace-with-base64-client-certificate-data
+    client-key-data: replace-with-base64-client-key-data
