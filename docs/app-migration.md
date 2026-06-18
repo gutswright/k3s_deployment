@@ -1,11 +1,5 @@
 # App Deployment
 
-The old VM deployment model was:
-
-```text
-local build -> rsync files to /rk4/<app> -> remote docker compose build/up -> Traefik Docker labels
-```
-
 The current k3s deployment model is:
 
 ```text
